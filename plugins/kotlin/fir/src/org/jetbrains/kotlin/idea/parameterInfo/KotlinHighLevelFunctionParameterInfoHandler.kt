@@ -116,6 +116,8 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
             // `objectsToView` is read-only so we can't change the size of the array. So we have to store an array here of the correct size,
             // which does mean we have to resolve here to know the number of candidates.
             val candidatesWithMapping = resolveCallCandidates(callElement)
+
+            // TODO: Filter shadowed candidates. See use of ShadowedDeclarationsFilter in KotlinFunctionParameterInfoHandler.kt.
             context.itemsToShow = Array(candidatesWithMapping.size) { CandidateInfo() }
 
             argumentList
@@ -154,7 +156,7 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
                     // Number of candidates somehow changed while UI is shown, which should NOT be possible. Bail out to be safe.
                     return
                 }
-                val (candidateSignature, argumentMapping) = candidatesWithMapping[index]
+                val (candidateSignature, argumentMapping, isSuccessful) = candidatesWithMapping[index]
 
                 // For array set calls, we only want the index arguments in brackets, which are all except the last (the value to set).
                 val isArraySetCall = candidateSignature.symbol.callableIdIfNonLocal?.let {
@@ -205,8 +207,7 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
                     setValueParameter
                 )
 
-                // TODO: This should be changed when there are multiple candidates available; need to know which one the call is resolved to
-                val isCallResolvedToCandidate = candidatesWithMapping.size == 1
+                val isCallResolvedToCandidate = isSuccessful || candidatesWithMapping.size == 1
 
                 candidateInfo.callInfo = CallInfo(
                     callElement,
@@ -388,9 +389,10 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
             var isDisabledBeforeHighlight = false
             var hasUnmappedArgument = false
             var hasUnmappedArgumentBeforeCurrent = false
+            var lastMappedArgumentIndex = -1
+            var namedMode = false
             val usedParameterIndices = HashSet<Int>()
             val text = buildString {
-                var namedMode = false
                 var argumentIndex = 0
 
                 fun appendParameter(
@@ -452,6 +454,7 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
                             argumentIndex++
                             continue
                         }
+                        lastMappedArgumentIndex = argumentIndex
                         if (!usedParameterIndices.add(parameterIndex)) continue
 
                         val shouldHighlight = parameterIndex == highlightParameterIndex
@@ -463,12 +466,13 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
                         val parameterIndex = argumentToParameterIndex[argument]
                         if (parameterIndex == null) {
                             hasUnmappedArgument = true
-                            if (argumentIndex <= currentArgumentIndex) {
+                            if (argumentIndex < currentArgumentIndex) {
                                 hasUnmappedArgumentBeforeCurrent = true
                             }
                             argumentIndex++
                             continue
                         }
+                        lastMappedArgumentIndex = argumentIndex
                         if (!usedParameterIndices.add(parameterIndex)) continue
 
                         val shouldHighlight = parameterIndex == highlightParameterIndex
@@ -500,7 +504,8 @@ abstract class KotlinHighLevelParameterInfoWithCallHandlerBase<TArgumentList : K
             val supportsTrailingCommas = callElement.languageVersionSettings.supportsFeature(LanguageFeature.TrailingCommas)
             val afterTrailingComma = arguments.isNotEmpty() && currentArgumentIndex == arguments.size
             val isInPositionToEnterArgument = !supportsTrailingCommas && afterTrailingComma
-            val tooManyArgs = allParametersUsed && (isInPositionToEnterArgument || hasUnmappedArgument)
+            val isAfterMappedArgs = currentArgumentIndex > lastMappedArgumentIndex
+            val tooManyArgs = allParametersUsed && (isInPositionToEnterArgument || hasUnmappedArgument) && (isAfterMappedArgs || namedMode)
 
             val isDisabled = tooManyArgs || hasTypeMismatchBeforeCurrent || hasUnmappedArgumentBeforeCurrent
 

@@ -2,46 +2,67 @@
 package org.jetbrains.kotlin.idea.parameterInfo
 
 import org.jetbrains.kotlin.analysis.api.KtAnalysisSession
-import org.jetbrains.kotlin.analysis.api.calls.KtFunctionCall
-import org.jetbrains.kotlin.analysis.api.calls.calls
-import org.jetbrains.kotlin.analysis.api.calls.symbol
+import org.jetbrains.kotlin.analysis.api.calls.*
+import org.jetbrains.kotlin.analysis.api.fir.diagnostics.KtFirDiagnostic
 import org.jetbrains.kotlin.analysis.api.symbols.*
 import org.jetbrains.kotlin.analysis.api.symbols.markers.KtSymbolWithVisibility
+import org.jetbrains.kotlin.analysis.api.types.KtTypeNullability
 import org.jetbrains.kotlin.psi.*
 
 // Analogous to Call.resolveCandidates() in plugins/kotlin/core/src/org/jetbrains/kotlin/idea/core/Utils.kt
 internal fun KtAnalysisSession.resolveCallCandidates(callElement: KtElement): List<CandidateWithMapping> {
-    // TODO: FE 1.0 plugin collects all candidates (i.e., all overloads), even if arguments do not match. Not just resolved call.
-    // See Call.resolveCandidates() in core/src/org/jetbrains/kotlin/idea/core/Utils.kt. Note `replaceCollectAllCandidates(true)`.
-
-    val (resolvedCall, receiver) = when (callElement) {
+    val (candidates, receiver, isSafeCall) = when (callElement) {
         is KtCallElement -> {
             val parent = callElement.parent
-            val receiver = if (parent is KtDotQualifiedExpression && parent.selectorExpression == callElement) {
+            val receiver = if (parent is KtQualifiedExpression && parent.selectorExpression == callElement) {
                 parent.receiverExpression
             } else null
-            Pair(callElement.resolveCall(), receiver)
+            Triple(callElement.resolveCandidates(), receiver, parent is KtSafeQualifiedExpression)
         }
-        is KtArrayAccessExpression -> Pair(callElement.resolveCall(), callElement.arrayExpression)
+        is KtArrayAccessExpression -> Triple(callElement.resolveCandidates(), callElement.arrayExpression, false)
         else -> return emptyList()
     }
 
+    if (candidates.isEmpty()) return emptyList()
     val fileSymbol = callElement.containingKtFile.getFileSymbol()
-    return resolvedCall.calls.filterIsInstance<KtFunctionCall<*>>()
-        .filter { filterCandidate(it.symbol, callElement, fileSymbol, receiver) }
-        .map {
-            CandidateWithMapping(
-                it.partiallyAppliedSymbol.signature,
-                it.argumentMapping,
-            )
-        }
+
+    return candidates.filter {
+        assert(it.calls.size == 1) { "resolveCandidates() should only have 1 candidate per KtCallInfo" }
+        filterCandidate(it, callElement, fileSymbol, receiver, isSafeCall)
+    }.mapNotNull {
+        val functionCall = it.calls.first() as? KtFunctionCall<*> ?: return@mapNotNull null
+        CandidateWithMapping(
+            functionCall.partiallyAppliedSymbol.signature,
+            functionCall.argumentMapping,
+            isSuccessful = it is KtSuccessCallInfo
+        )
+    }
+}
+
+private fun KtAnalysisSession.filterCandidate(
+    call: KtCallInfo,
+    callElement: KtElement,
+    fileSymbol: KtFileSymbol,
+    receiver: KtExpression?,
+    isSafeCall: Boolean
+): Boolean {
+    // Filter out hidden candidates. The diagnostic for callables with `@Deprecated(DeprecationLevel.HIDDEN)` is UNRESOLVED_REFERENCE.
+    if (call is KtErrorCallInfo && call.diagnostic is KtFirDiagnostic.UnresolvedReference) {
+        return false
+    }
+
+    val candidateCall = call.calls.first()
+    if (candidateCall !is KtFunctionCall<*>) return false
+    val candidateSymbol = candidateCall.partiallyAppliedSymbol.signature.symbol
+    return filterCandidate(candidateSymbol, callElement, fileSymbol, receiver, isSafeCall)
 }
 
 internal fun KtAnalysisSession.filterCandidate(
     candidateSymbol: KtSymbol,
     callElement: KtElement,
     fileSymbol: KtFileSymbol,
-    receiver: KtExpression?
+    receiver: KtExpression?,
+    isSafeCall: Boolean
 ): Boolean {
     if (callElement is KtConstructorDelegationCall) {
         // Exclude caller from candidates for `this(...)` delegated constructor calls.
@@ -55,7 +76,8 @@ internal fun KtAnalysisSession.filterCandidate(
 
     if (receiver != null && candidateSymbol is KtCallableSymbol) {
         // Filter out candidates with wrong receiver
-        val receiverType = receiver.getKtType() ?: error("Receiver should have a KtType")
+        val receiverType = receiver.getKtType()?.let { if (isSafeCall) it.withNullability(KtTypeNullability.NON_NULLABLE) else it }
+            ?: error("Receiver should have a KtType")
         val candidateReceiverType = candidateSymbol.receiverType
         if (candidateReceiverType != null && receiverType.isNotSubTypeOf(candidateReceiverType)) return false
     }
@@ -69,4 +91,5 @@ internal fun KtAnalysisSession.filterCandidate(
 internal data class CandidateWithMapping(
     val candidate: KtFunctionLikeSignature<KtFunctionLikeSymbol>,
     val argumentMapping: LinkedHashMap<KtExpression, KtVariableLikeSignature<KtValueParameterSymbol>>,
+    val isSuccessful: Boolean,
 )

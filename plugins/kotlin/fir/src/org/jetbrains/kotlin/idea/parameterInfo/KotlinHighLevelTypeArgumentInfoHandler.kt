@@ -51,12 +51,12 @@ class KotlinHighLevelFunctionTypeArgumentInfoHandler : KotlinHighLevelTypeArgume
         // will NOT return a KtCall because there is no FirFunctionCall there. We find the symbols using the callee name instead.
         val reference = callElement.calleeExpression?.references?.singleOrNull() as? KtSimpleNameReference ?: return null
         val parent = callElement.parent
-        val receiver = if (parent is KtDotQualifiedExpression && parent.selectorExpression == callElement) {
+        val receiver = if (parent is KtQualifiedExpression && parent.selectorExpression == callElement) {
             parent.receiverExpression
         } else null
         val fileSymbol = callElement.containingKtFile.getFileSymbol()
         val symbols = reference.resolveToSymbols().filterIsInstance<KtSymbolWithTypeParameters>()
-            .filter { filterCandidate(it, callElement, fileSymbol, receiver) }
+            .filter { filterCandidate(it, callElement, fileSymbol, receiver, parent is KtSafeQualifiedExpression) }
 
         // Multiple overloads may have the same type parameters (see Overloads.kt test), so we select the distinct ones.
         return symbols.distinctBy { buildPresentation(fetchCandidateInfo(it), -1).first }
